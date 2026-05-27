@@ -6,8 +6,10 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tree_sitter::Parser;
 
+use crate::completion as completion_impl;
 use crate::definition;
 use crate::document::FileState;
+use crate::hover as hover_impl;
 use crate::references;
 
 pub struct Backend {
@@ -47,6 +49,11 @@ impl LanguageServer for Backend {
                 )),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".into()]),
+                    ..Default::default()
+                }),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -96,6 +103,41 @@ impl LanguageServer for Backend {
             .documents
             .get(&uri)
             .and_then(|state| definition::goto_definition(&state, position));
+
+        Ok(result)
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>> {
+        let uri = params
+            .text_document_position
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position.position;
+
+        let result = self
+            .documents
+            .get(&uri)
+            .and_then(|state| completion_impl::completion(&state, position));
+
+        Ok(result)
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+
+        let result = self
+            .documents
+            .get(&uri)
+            .and_then(|state| hover_impl::hover(&state, position));
 
         Ok(result)
     }

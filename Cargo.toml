@@ -15,7 +15,8 @@ log = "0.4"
 env_logger = "0.11"
 
 [dependencies.tree-sitter-tengo]
-path = "tree-sitter-tengo"
+git = "https://github.com/popoffvg/tree-sitter-tengo"
+rev = "0184f5bc04e3e9999ae1394612d2ee6495102fec"
 
 [profile.release]
 strip = true

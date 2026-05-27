@@ -1,6 +1,9 @@
 mod backend;
+mod completion;
 mod definition;
 mod document;
+mod exports;
+mod hover;
 mod references;
 mod resolver;
 mod scope;

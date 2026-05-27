@@ -1,1 +1,7 @@
 target/
+
+# Local scratch / test fixtures (external packages, not part of the project)
+codedb.snapshot
+mixcr-clonotyping
+workflow-tengo/
+tengo-builder/
