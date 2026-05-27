@@ -16,6 +16,7 @@ pub struct Backend {
     client: Client,
     documents: DashMap<String, FileState>,
     parser: Mutex<Parser>,
+    workspace_roots: Mutex<Vec<std::path::PathBuf>>,
 }
 
 impl Backend {
@@ -28,6 +29,7 @@ impl Backend {
             client,
             documents: DashMap::new(),
             parser: Mutex::new(parser),
+            workspace_roots: Mutex::new(Vec::new()),
         }
     }
 
@@ -41,7 +43,26 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Capture workspace roots so references can scan the whole workspace.
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(folders) = &params.workspace_folders {
+            for f in folders {
+                if let Ok(p) = f.uri.to_file_path() {
+                    roots.push(p);
+                }
+            }
+        }
+        #[allow(deprecated)]
+        if roots.is_empty() {
+            if let Some(root_uri) = &params.root_uri {
+                if let Ok(p) = root_uri.to_file_path() {
+                    roots.push(p);
+                }
+            }
+        }
+        *self.workspace_roots.lock().unwrap() = roots;
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -150,10 +171,13 @@ impl LanguageServer for Backend {
         let position = params.text_document_position.position;
         let include_decl = params.context.include_declaration;
 
+        let roots = self.workspace_roots.lock().unwrap().clone();
         let result = self
             .documents
             .get(&uri)
-            .and_then(|state| references::find_references(&state, position, include_decl));
+            .and_then(|state| {
+                references::find_references(&state, position, include_decl, &roots, &self.parser)
+            });
 
         Ok(result)
     }
