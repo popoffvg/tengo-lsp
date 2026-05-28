@@ -4,6 +4,7 @@ mod definition;
 mod document;
 mod exports;
 mod hover;
+mod outline;
 mod references;
 mod resolver;
 mod scope;

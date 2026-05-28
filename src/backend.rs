@@ -10,6 +10,7 @@ use crate::completion as completion_impl;
 use crate::definition;
 use crate::document::FileState;
 use crate::hover as hover_impl;
+use crate::outline;
 use crate::references;
 
 pub struct Backend {
@@ -75,6 +76,7 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -179,6 +181,18 @@ impl LanguageServer for Backend {
                 references::find_references(&state, position, include_decl, &roots, &self.parser)
             });
 
+        Ok(result)
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri.to_string();
+        let result = self
+            .documents
+            .get(&uri)
+            .and_then(|state| outline::document_symbols(&state));
         Ok(result)
     }
 }
