@@ -9,8 +9,29 @@ permissions:
   contents: write
 
 jobs:
+  changelog:
+    name: Generate release notes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog for this tag
+        id: git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+
+      - name: Create release with notes
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.git-cliff.outputs.content }}
+
   build:
     name: ${{ matrix.asset_name }}
+    needs: changelog
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
