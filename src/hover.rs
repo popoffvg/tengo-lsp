@@ -38,9 +38,131 @@ fn render_hover(m: &ExportMember) -> String {
     let mut out = format!("```tengo\n{head}\n```");
     if let Some(doc) = &m.doc {
         out.push_str("\n\n");
-        out.push_str(doc);
+        out.push_str(&format_doc(doc));
     }
     out
+}
+
+/// Render a doc comment as Markdown, turning JSDoc-style `@param` / `@return`
+/// tags into readable sections instead of one collapsed paragraph (Markdown
+/// treats single newlines as spaces, so consecutive tag lines run together).
+fn format_doc(doc: &str) -> String {
+    let mut desc: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    let mut returns: Vec<String> = Vec::new();
+    let mut other: Vec<String> = Vec::new();
+
+    for raw in doc.lines() {
+        let line = raw.trim();
+        if let Some(rest) = strip_tag(line, &["@param", "@arg", "@argument"]) {
+            params.push(format_param(rest));
+        } else if let Some(rest) = strip_tag(line, &["@return", "@returns"]) {
+            returns.push(format_return(rest));
+        } else if let Some(rest) = line.strip_prefix('@') {
+            let (tag, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            other.push(format!("**{}** {}", tag, body.trim()).trim().to_string());
+        } else {
+            desc.push(line.to_string());
+        }
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+    let body = desc.join("\n");
+    let body = body.trim();
+    if !body.is_empty() {
+        sections.push(body.to_string());
+    }
+    if !params.is_empty() {
+        sections.push(format!("**Parameters**\n\n{}", params.join("\n")));
+    }
+    if !returns.is_empty() {
+        sections.push(format!("**Returns**\n\n{}", returns.join("\n")));
+    }
+    if !other.is_empty() {
+        sections.push(other.join("\n\n"));
+    }
+    sections.join("\n\n")
+}
+
+/// Strip a leading tag (one of `tags`) followed by a word boundary, returning
+/// the trimmed remainder.
+fn strip_tag<'a>(line: &'a str, tags: &[&str]) -> Option<&'a str> {
+    for tag in tags {
+        if let Some(rest) = line.strip_prefix(tag) {
+            if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+                return Some(rest.trim());
+            }
+        }
+    }
+    None
+}
+
+/// Format a `@param` body. Accepts `name: type - desc`, `name - desc`,
+/// `{type} name desc`, or `name desc`.
+fn format_param(body: &str) -> String {
+    // JSDoc `{type} name desc`
+    let (ty, body) = if let Some(stripped) = body.strip_prefix('{') {
+        match stripped.split_once('}') {
+            Some((t, r)) => (Some(t.trim().to_string()), r.trim()),
+            None => (None, body),
+        }
+    } else {
+        (None, body)
+    };
+
+    // name is up to the first `:` or whitespace.
+    let split = body
+        .find(|c: char| c == ':' || c.is_whitespace())
+        .unwrap_or(body.len());
+    let name = &body[..split];
+    let mut rest = body[split..].trim_start();
+
+    // `name: type - desc` — pull the type from before " - ".
+    let mut ty = ty;
+    if rest.starts_with(':') {
+        let after = rest[1..].trim_start();
+        if let Some((t, d)) = after.split_once(" - ") {
+            ty = Some(t.trim().to_string());
+            rest = d.trim_start();
+        } else {
+            rest = after;
+        }
+    } else if let Some(stripped) = rest.strip_prefix('-') {
+        rest = stripped.trim_start();
+    } else if let Some((_, d)) = rest.split_once(" - ") {
+        rest = d.trim_start();
+    }
+
+    let desc = rest.trim();
+    let mut out = format!("- `{name}`");
+    if let Some(t) = ty.filter(|t| !t.is_empty()) {
+        out.push_str(&format!(" *({t})*"));
+    }
+    if !desc.is_empty() {
+        out.push_str(&format!(" — {desc}"));
+    }
+    out
+}
+
+/// Format a `@return` body. Accepts `name - desc` or just `desc`.
+fn format_return(body: &str) -> String {
+    let (ty, body) = if let Some(stripped) = body.strip_prefix('{') {
+        match stripped.split_once('}') {
+            Some((t, r)) => (Some(t.trim().to_string()), r.trim()),
+            None => (None, body),
+        }
+    } else {
+        (None, body)
+    };
+    let text = if let Some((name, desc)) = body.split_once(" - ") {
+        format!("`{}` — {}", name.trim(), desc.trim())
+    } else {
+        body.to_string()
+    };
+    match ty.filter(|t| !t.is_empty()) {
+        Some(t) => format!("*({t})* {text}"),
+        None => text,
+    }
 }
 
 /// Resolve `<alias>.<member>` at `position`, where the cursor is on `member`.
@@ -93,6 +215,35 @@ mod tests {
         let s = render_hover(&m);
         assert!(s.contains("```tengo\ncreateFileDataset(a, b)\n```"));
         assert!(s.ends_with("Builds a dataset."));
+    }
+
+    #[test]
+    fn formats_param_and_return_tags() {
+        let doc = "Builder function for creating a RunCommand resource.\n\n@param workdir: smart.reference - the working directory for the command.\n@return builder - the builder object with methods.";
+        let s = format_doc(doc);
+        assert!(s.contains("Builder function for creating a RunCommand resource."));
+        assert!(s.contains("**Parameters**"));
+        assert!(s.contains("- `workdir` *(smart.reference)* — the working directory for the command."));
+        assert!(s.contains("**Returns**"));
+        assert!(s.contains("`builder` — the builder object with methods."));
+    }
+
+    #[test]
+    fn formats_param_without_type() {
+        assert_eq!(format_param("count - number of items"), "- `count` — number of items");
+    }
+
+    #[test]
+    fn formats_jsdoc_brace_type_param() {
+        assert_eq!(
+            format_param("{string} name the user name"),
+            "- `name` *(string)* — the user name"
+        );
+    }
+
+    #[test]
+    fn plain_doc_is_unchanged() {
+        assert_eq!(format_doc("Builds a dataset."), "Builds a dataset.");
     }
 
     #[test]
