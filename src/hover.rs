@@ -52,17 +52,45 @@ fn format_doc(doc: &str) -> String {
     let mut returns: Vec<String> = Vec::new();
     let mut other: Vec<String> = Vec::new();
 
+    // Where the next plain (non-tag) line belongs: the lead description until a
+    // tag is seen, then the most recent tag's bucket (so wrapped descriptions
+    // and sub-fields stay attached to their tag instead of leaking into the lead).
+    enum Cur {
+        Desc,
+        Params,
+        Returns,
+        Other,
+    }
+    let mut cur = Cur::Desc;
+
     for raw in doc.lines() {
         let line = raw.trim();
         if let Some(rest) = strip_tag(line, &["@param", "@arg", "@argument"]) {
             params.push(format_param(rest));
+            cur = Cur::Params;
         } else if let Some(rest) = strip_tag(line, &["@return", "@returns"]) {
             returns.push(format_return(rest));
+            cur = Cur::Returns;
         } else if let Some(rest) = line.strip_prefix('@') {
             let (tag, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             other.push(format!("**{}** {}", tag, body.trim()).trim().to_string());
-        } else {
+            cur = Cur::Other;
+        } else if let Cur::Desc = cur {
+            // Lead description: keep lines (blanks make paragraph breaks).
             desc.push(line.to_string());
+        } else if !line.is_empty() {
+            // Continuation of the last tag: append to its bullet.
+            let bucket = match cur {
+                Cur::Params => &mut params,
+                Cur::Returns => &mut returns,
+                _ => &mut other,
+            };
+            if let Some(last) = bucket.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            } else {
+                bucket.push(line.to_string());
+            }
         }
     }
 
@@ -144,7 +172,7 @@ fn format_param(body: &str) -> String {
     out
 }
 
-/// Format a `@return` body. Accepts `name - desc` or just `desc`.
+/// Format a `@return` body. Accepts `name: desc`, `name - desc`, or just `desc`.
 fn format_return(body: &str) -> String {
     let (ty, body) = if let Some(stripped) = body.strip_prefix('{') {
         match stripped.split_once('}') {
@@ -154,10 +182,17 @@ fn format_return(body: &str) -> String {
     } else {
         (None, body)
     };
-    let text = if let Some((name, desc)) = body.split_once(" - ") {
-        format!("`{}` — {}", name.trim(), desc.trim())
-    } else {
-        body.to_string()
+    // A leading `name:` or `name -` introduces a named return value.
+    let named = body.split_once(" - ").or_else(|| {
+        let colon = body.find(':')?;
+        let name = body[..colon].trim();
+        // Only treat as a name if it's a single bare word (not a sentence).
+        (!name.is_empty() && !name.contains(char::is_whitespace))
+            .then(|| (name, body[colon + 1..].trim_start()))
+    });
+    let text = match named {
+        Some((name, desc)) => format!("`{}` — {}", name.trim(), desc.trim()),
+        None => body.to_string(),
     };
     match ty.filter(|t| !t.is_empty()) {
         Some(t) => format!("*({t})* {text}"),
@@ -226,6 +261,18 @@ mod tests {
         assert!(s.contains("- `workdir` *(smart.reference)* — the working directory for the command."));
         assert!(s.contains("**Returns**"));
         assert!(s.contains("`builder` — the builder object with methods."));
+    }
+
+    #[test]
+    fn attaches_continuation_lines_to_their_tag() {
+        let doc = "Creates ephemeral render template resource.\n@param tpl: template resource\n@param opts: (optional) a map of options:\n  metaInputs: a map of meta inputs. No effect on ephemeral templates.\n@return renderer: a smart resource";
+        let s = format_doc(doc);
+        // The metaInputs continuation must stay under opts, not leak into the lead.
+        let lead = s.split("**Parameters**").next().unwrap();
+        assert!(!lead.contains("metaInputs"));
+        assert!(s.contains("- `opts` — (optional) a map of options: metaInputs: a map of meta inputs. No effect on ephemeral templates."));
+        assert!(s.contains("- `tpl` — template resource"));
+        assert!(s.contains("`renderer` — a smart resource"));
     }
 
     #[test]
