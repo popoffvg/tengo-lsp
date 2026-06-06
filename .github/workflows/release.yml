@@ -99,15 +99,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up tap deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+
       - name: Regenerate formula and push to tap
         env:
           # GH_TOKEN reads this repo's release assets (script uses `gh release download`).
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # PAT (popoffvg account) with contents:write on popoffvg/homebrew-tengo-lsp.
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new"
         run: |
           version="${GITHUB_REF_NAME#v}"
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/popoffvg/homebrew-tengo-lsp.git" tap
+          git clone git@github.com:popoffvg/homebrew-tengo-lsp.git tap
           mkdir -p tap/Formula
           scripts/gen-homebrew-formula.sh "$version" > tap/Formula/tengo-lsp.rb
           cd tap
