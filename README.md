@@ -85,6 +85,46 @@ The [Zed](https://github.com/popoffvg/zed-tengo) and
 `tengo-lsp` on your `PATH` and otherwise download the matching release binary
 automatically — no manual setup needed.
 
+## Claude Code plugin
+
+This repo also ships a [Claude Code](https://code.claude.com) plugin,
+**`tengo-fmt`** (in [`claude-plugin/`](claude-plugin/)), that keeps Tengo files
+formatted while Claude Code edits them. Two `PostToolUse` hooks:
+
+- After Claude writes/edits a `*.tengo` file → runs `tengo-lsp fmt --write` on it.
+- When a `python`/`perl`/`bash` command touches a `.tengo` file → reminds Claude
+  to format (script edits bypass the write hook).
+
+Requires `tengo-lsp` (current build, for the `fmt` subcommand) and `jq` on `PATH`.
+
+### Install
+
+The repo doubles as a plugin marketplace (`.claude-plugin/marketplace.json`).
+In a Claude Code session:
+
+```
+/plugin marketplace add popoffvg/tengo-lsp
+/plugin install tengo-fmt@tengo-lsp
+```
+
+Equivalent CLI:
+
+```bash
+claude plugin marketplace add popoffvg/tengo-lsp
+claude plugin install tengo-fmt@tengo-lsp
+```
+
+Local development — load the plugin directory directly without the marketplace:
+
+```bash
+claude --plugin-dir ./claude-plugin
+# validate the manifests:
+claude plugin validate .
+```
+
+See [`claude-plugin/README.md`](claude-plugin/README.md) for the hook details
+and the limits of the script-touch heuristic.
+
 ## How it works
 
 The server parses each open document with Tree-sitter and builds a per-file

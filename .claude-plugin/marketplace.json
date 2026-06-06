@@ -1,0 +1,20 @@
+{
+  "name": "tengo-lsp",
+  "owner": {
+    "name": "Vitalii Popov",
+    "url": "https://github.com/popoffvg"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for the Tengo language server — formatting automation built on tengo-lsp."
+  },
+  "plugins": [
+    {
+      "name": "tengo-fmt",
+      "source": "./claude-plugin",
+      "description": "Auto-formats Tengo files with `tengo-lsp fmt` after Write/Edit, and reminds Claude to format when a python/bash/perl command mutates .tengo files.",
+      "version": "0.1.0",
+      "author": { "name": "Vitalii Popov" },
+      "license": "MIT"
+    }
+  ]
+}
