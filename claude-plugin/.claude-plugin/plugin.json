@@ -1,0 +1,7 @@
+{
+  "name": "tengo-fmt",
+  "version": "0.1.0",
+  "description": "Auto-formats Tengo files with `tengo-lsp fmt` after Write/Edit, and reminds Claude to format when a python/bash/perl command mutates .tengo files.",
+  "author": { "name": "Vitalii Popov" },
+  "license": "MIT"
+}
