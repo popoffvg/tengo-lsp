@@ -6,6 +6,7 @@ mod exports;
 mod hover;
 mod outline;
 mod references;
+mod rename;
 mod resolver;
 mod scope;
 mod symbols;

@@ -16,6 +16,7 @@ see the [Zed](https://github.com/popoffvg/zed-tengo) and
 | --- | --- |
 | **Go to definition** | Jump from an `import("...")` string or an import alias to the imported file; from `alias.member` to the matching key in the target file's `export { ... }` block; and from SDK artifact calls to the artifact file. |
 | **Find references** | Workspace-wide for exported module members: every `alias.member` usage across importing files plus references inside the defining module. Local symbols resolve within their scope in the current file. |
+| **Rename** | Renames a symbol and all its references using the same scope/cross-file analysis as find-references: local symbols within their scope, exported members across the whole workspace (including the `export` key). Shadow-aware (won't touch a parameter that shadows the name) and reads unsaved editor buffers. Divergent export keys (`ext: local`, literals, inline funcs) are refused via `prepareRename` to avoid half-applied edits. |
 | **Completion** | After `.` on an imported alias, lists the members exported by that module. |
 | **Hover** | Signature and doc comment of imported members — both `//` line docs and `/** */` JSDoc blocks, resolved through wrapped `export` maps. |
 
@@ -92,6 +93,7 @@ that model:
 
 - `src/definition.rs` — go to definition
 - `src/references.rs` — find references (single-file and workspace-wide)
+- `src/rename.rs` — rename symbol / prepare-rename, reusing the reference search
 - `src/completion.rs` — member completion
 - `src/hover.rs` — hover docs
 - `src/exports.rs` — parse `export { ... }` maps, member ranges, signatures, docs

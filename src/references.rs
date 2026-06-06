@@ -17,6 +17,17 @@ const SKIP_DIRS: &[&str] = &["node_modules", "dist", "target", ".git"];
 /// against pathologically large trees.
 const MAX_FILES: usize = 10_000;
 
+/// Provides the in-memory source for a path when the file is open in the
+/// editor with unsaved changes. Cross-file scans consult this before falling
+/// back to disk so emitted ranges match the editor's live buffer (critical for
+/// rename, which writes those ranges back). Return `None` to use disk.
+pub type SourceOverlay<'a> = dyn Fn(&Path) -> Option<String> + 'a;
+
+/// Read a file's source, preferring the editor's in-memory buffer over disk.
+fn read_source(overlay: &SourceOverlay, path: &Path) -> Option<String> {
+    overlay(path).or_else(|| std::fs::read_to_string(path).ok())
+}
+
 /// Handle textDocument/references.
 ///
 /// Two modes:
@@ -33,6 +44,7 @@ pub fn find_references(
     include_declaration: bool,
     roots: &[PathBuf],
     parser: &Mutex<Parser>,
+    overlay: &SourceOverlay,
 ) -> Option<Vec<Location>> {
     let point = tree_sitter::Point {
         row: position.line as usize,
@@ -51,7 +63,7 @@ pub fn find_references(
     // Decide whether this is a cross-file (exported member) reference search.
     if let Some((module_file, member)) = resolve_module_member(state, node, &name) {
         let search_roots = effective_roots(state, roots);
-        return cross_file_references(&module_file, &member, include_declaration, &search_roots, parser);
+        return cross_file_references(&module_file, &member, include_declaration, &search_roots, parser, overlay);
     }
 
     // Local symbol: in-file references within the definition's scope.
@@ -120,12 +132,13 @@ fn cross_file_references(
     include_declaration: bool,
     roots: &[PathBuf],
     parser: &Mutex<Parser>,
+    overlay: &SourceOverlay,
 ) -> Option<Vec<Location>> {
     let mut locations: Vec<Location> = Vec::new();
     let target = canonical(module_file);
 
     // References inside the defining module (bare `member` usages).
-    if let Ok(src) = std::fs::read_to_string(module_file) {
+    if let Some(src) = read_source(overlay, module_file) {
         if let Some(uri) = Url::from_file_path(module_file).ok() {
             let mut guard = parser.lock().unwrap();
             if let Some(state) = FileState::parse(uri.to_string(), src, &mut guard) {
@@ -145,9 +158,9 @@ fn cross_file_references(
             if canonical(path) == target {
                 return; // module's own bare refs already handled above
             }
-            let src = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(_) => return,
+            let src = match read_source(overlay, path) {
+                Some(s) => s,
+                None => return,
             };
             let uri = match Url::from_file_path(path) {
                 Ok(u) => u,
@@ -253,6 +266,14 @@ fn scope_references(
             && r.byte_range.start < def_scope.end_byte
             && r.byte_range.start >= def.byte_range.start
         {
+            // Shadow-awareness: a bare identifier inside `def`'s scope may resolve
+            // to an inner binding (e.g. a parameter named the same). Keep it only
+            // if it actually resolves to *this* def; otherwise renaming would
+            // rewrite an unrelated, shadowing symbol.
+            match state.resolve_def(name, r.byte_range.start) {
+                Some(resolved) if resolved.byte_range.start == def.byte_range.start => {}
+                _ => continue,
+            }
             out.push(Location {
                 uri: uri.clone(),
                 range: r.range,
@@ -376,6 +397,11 @@ mod tests {
         Mutex::new(p)
     }
 
+    /// Overlay that never overrides disk — tests read fixtures from disk.
+    fn no_overlay() -> Box<SourceOverlay<'static>> {
+        Box::new(|_: &Path| None)
+    }
+
     fn parse(uri: &str, src: &str) -> FileState {
         let mut parser = Parser::new();
         parser
@@ -434,7 +460,7 @@ mod tests {
         let col = line.find("doThing").unwrap() as u32;
 
         let parser = new_parser();
-        let locs = find_references(&state, Position::new(3, col), false, &[], &parser)
+        let locs = find_references(&state, Position::new(3, col), false, &[], &parser, &no_overlay())
             .expect("should find cross-file references");
 
         // a.lib.tengo (1) + b.lib.tengo (2) usages of `.doThing`.
@@ -463,7 +489,7 @@ mod tests {
         let col = text.lines().nth(key_line).unwrap().find("doThing").unwrap() as u32;
 
         let parser = new_parser();
-        let locs = find_references(&state, Position::new(key_line as u32, col), true, &[], &parser)
+        let locs = find_references(&state, Position::new(key_line as u32, col), true, &[], &parser, &no_overlay())
             .expect("should find references");
 
         let in_module = locs
@@ -496,7 +522,7 @@ mod tests {
         let col = text.lines().nth(wrap_line).unwrap().find("wrap").unwrap() as u32;
 
         let parser = new_parser();
-        let locs = find_references(&state, Position::new(wrap_line as u32, col), true, &[], &parser);
+        let locs = find_references(&state, Position::new(wrap_line as u32, col), true, &[], &parser, &no_overlay());
 
         if let Some(locs) = locs {
             assert!(
@@ -543,7 +569,7 @@ mod tests {
         let col = module.lines().nth(line).unwrap().find("doThing").unwrap() as u32;
 
         let parser = new_parser();
-        let locs = find_references(&state, Position::new(line as u32, col), true, &[src.clone()], &parser);
+        let locs = find_references(&state, Position::new(line as u32, col), true, &[src.clone()], &parser, &no_overlay());
 
         if let Some(locs) = locs {
             assert!(
@@ -564,6 +590,6 @@ mod tests {
         );
         let parser = new_parser();
         // `x` is local; must not panic with no workspace.
-        let _ = find_references(&state, Position::new(0, 0), true, &[], &parser);
+        let _ = find_references(&state, Position::new(0, 0), true, &[], &parser, &no_overlay());
     }
 }
