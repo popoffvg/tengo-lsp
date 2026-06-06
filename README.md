@@ -48,6 +48,15 @@ Imports are resolved the way the Platforma package builder resolves them:
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+```bash
+brew install popoffvg/tengo-lsp/tengo-lsp
+```
+
+This taps [`popoffvg/homebrew-tengo-lsp`](https://github.com/popoffvg/homebrew-tengo-lsp)
+and installs the prebuilt binary. Upgrade with `brew upgrade tengo-lsp`.
+
 ### Prebuilt binaries
 
 Download the archive for your platform from the
