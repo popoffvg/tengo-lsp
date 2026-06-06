@@ -65,22 +65,76 @@ pub fn format_with_tree(source: &str, tree: &Tree) -> String {
     collect_chain_indents(root, bytes, &line_starts, &mut seen, &mut delims);
     delims.sort_unstable_by_key(|&(off, _)| off);
 
-    let mut lines: Vec<String> = Vec::with_capacity(line_starts.len());
+    // Bucket each delimiter's ±1 onto the row it sits on, preserving offset
+    // (= source) order within the row. `delims` is already sorted by offset.
+    let num_rows = line_starts.len();
+    let mut row_deltas: Vec<Vec<i32>> = vec![Vec::new(); num_rows];
+    for &(off, d) in &delims {
+        let row = line_starts.partition_point(|&s| s <= off) - 1;
+        row_deltas[row].push(d);
+    }
+
+    // Line-based indentation (gofmt-style), not per-bracket. Several brackets
+    // opening on one line (`foo({`) add a SINGLE level; the matching closers
+    // remove a single level. `raw_depth` is the true bracket-nesting count;
+    // `stack` holds, for each open indent level, the raw depth just *below* the
+    // scope that introduced it ("threshold"). A line's indent is the number of
+    // thresholds strictly below its depth — robust to the gaps that collapsing
+    // consecutive opens creates (`({` yields thresholds like [0, 2]).
+    let mut lines: Vec<String> = Vec::with_capacity(num_rows);
+    let mut raw_depth: i32 = 0;
+    let mut stack: Vec<i32> = Vec::new();
     for (row, &start) in line_starts.iter().enumerate() {
         let end = line_starts.get(row + 1).map_or(bytes.len(), |&s| s - 1); // exclude '\n'
-        let line = &source[start..end];
-        let content = line.trim(); // strips leading/trailing ws incl. a trailing '\r'
+        let content = source[start..end].trim(); // strips leading/trailing ws incl. a trailing '\r'
+
         if content.is_empty() {
             lines.push(String::new());
+        } else {
+            // A line that opens with closers aligns one level out per leading
+            // closer, to sit with the opener line.
+            let lead_closers = content
+                .chars()
+                .take_while(|&c| matches!(c, '}' | ']' | ')'))
+                .count() as i32;
+            let lead_depth = (raw_depth - lead_closers).max(0);
+            let depth = stack.iter().filter(|&&t| t < lead_depth).count();
+            let mut rendered = "\t".repeat(depth);
+            rendered.push_str(content);
+            lines.push(rendered);
+        }
+
+        // Advance bracket state for the following lines. A line introduces at
+        // most one new level — at the lowest depth it reaches (`min_after`),
+        // so a line that closes then reopens (`} else {`) still indents its
+        // body. Closers pop every level opened at or above the new depth.
+        let mut min_after = raw_depth;
+        for &d in &row_deltas[row] {
+            raw_depth += d;
+            if d < 0 {
+                while stack.last().is_some_and(|&t| t >= raw_depth) {
+                    stack.pop();
+                }
+            }
+            if raw_depth < min_after {
+                min_after = raw_depth;
+            }
+        }
+        if raw_depth > min_after && stack.last() != Some(&min_after) {
+            stack.push(min_after);
+        }
+    }
+
+    // Collapse runs of blank lines to a single blank line (gofmt-style), and
+    // drop blank lines at the very start of the file.
+    let mut collapsed: Vec<String> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.is_empty() && collapsed.last().map_or(true, |l: &String| l.is_empty()) {
             continue;
         }
-        let leading = line.len() - line.trim_start().len();
-        let first = start + leading;
-        let depth = indent_depth(&delims, first, content);
-        let mut rendered = "\t".repeat(depth);
-        rendered.push_str(content);
-        lines.push(rendered);
+        collapsed.push(line);
     }
+    let mut lines = collapsed;
 
     // Drop trailing blank lines, then join with one trailing newline (none if
     // there's no content at all).
@@ -148,25 +202,6 @@ fn collect_chain_indents(
         }
         collect_chain_indents(child, bytes, line_starts, seen, out);
     }
-}
-
-/// Indentation depth (tab count) for a line whose first content byte is `first`.
-/// Depth = number of delimiters still open just before `first`; a line that
-/// begins with a closer dedents one level to align with its opener, and a
-/// leading-dot method-chain continuation (`.bar()`) indents one level in.
-fn indent_depth(delims: &[(usize, i32)], first: usize, content: &str) -> usize {
-    let mut depth: i32 = 0;
-    for &(off, d) in delims {
-        if off < first {
-            depth += d;
-        } else {
-            break;
-        }
-    }
-    if content.starts_with('}') || content.starts_with(']') || content.starts_with(')') {
-        depth -= 1;
-    }
-    depth.max(0) as usize
 }
 
 /// CLI entry point for `tengo-lsp fmt [--write] [files...]`.
@@ -378,6 +413,49 @@ result := compute(
         let mangled = "r := outer(\ninner(\na,\nb,\n),\nc,\n)\n";
         let want = "r := outer(\n\tinner(\n\t\ta,\n\t\tb,\n\t),\n\tc,\n)\n";
         assert_eq!(format(mangled), want);
+    }
+
+    #[test]
+    fn collapses_runs_of_blank_lines() {
+        // Multiple consecutive blanks collapse to one; a single blank survives;
+        // leading blanks are dropped.
+        assert_eq!(format("\n\n\na := 1\n\n\n\nb := 2\n"), "a := 1\n\nb := 2\n");
+        assert_eq!(format("a := 1\n\nb := 2\n"), "a := 1\n\nb := 2\n");
+        // Inside a block too.
+        let mangled = "m := {\na: 1,\n\n\n\nb: 2,\n}\n";
+        let want = "m := {\n\ta: 1,\n\n\tb: 2,\n}\n";
+        assert_eq!(format(mangled), want);
+        assert_eq!(format(&want), want, "must be idempotent");
+    }
+
+    #[test]
+    fn collapses_consecutive_opens_to_one_level() {
+        // The bug fix: `(` and `{` opening on the SAME line (a map literal as
+        // the sole call arg, `ll.toStrict({`) add ONE indent level, not two.
+        let mangled = "self = call({\na: 1,\nb: func(x) {\nreturn x\n},\n})\n";
+        let want = "self = call({\n\ta: 1,\n\tb: func(x) {\n\t\treturn x\n\t},\n})\n";
+        assert_eq!(format(mangled), want);
+        assert_eq!(format(&want), want, "must be idempotent");
+    }
+
+    #[test]
+    fn collapses_triple_close() {
+        // Three closers on one line (`}))`) dedent a single level, matching the
+        // three opens that were collapsed on `h(use({`.
+        let mangled = "x := h(use({\na: 1,\n}))\n";
+        let want = "x := h(use({\n\ta: 1,\n}))\n";
+        assert_eq!(format(mangled), want);
+        assert_eq!(format(&want), want, "must be idempotent");
+    }
+
+    #[test]
+    fn close_then_reopen_keeps_indent() {
+        // `} else {` closes a block and opens a new one on one line; the new
+        // block's body must still indent (the min_after rule).
+        let mangled = "if x {\na\n} else {\nb\n}\n";
+        let want = "if x {\n\ta\n} else {\n\tb\n}\n";
+        assert_eq!(format(mangled), want);
+        assert_eq!(format(&want), want, "must be idempotent");
     }
 
     #[test]
