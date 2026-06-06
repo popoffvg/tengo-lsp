@@ -164,10 +164,12 @@ fn collect_delimiters(node: Node, out: &mut Vec<(usize, i32)>) {
 }
 
 /// Find multi-line method chains and emit a virtual bracket pair for each.
-/// A chain is detected by a `.` token that is the first non-whitespace on its
-/// line (leading-dot continuation); its root is the outermost enclosing
+/// A chain is detected by a `.` token sitting at a line boundary — either the
+/// first non-whitespace on its line (leading-dot style, `.bar()`) or the last
+/// (trailing-dot style, `foo().`). Its root is the outermost enclosing
 /// call/selector expression. The virtual open sits at the newline ending the
-/// chain's first line; the close at the chain's end byte.
+/// chain's first line; the close at the chain's end byte, so every
+/// continuation line indents one level under the chain start.
 fn collect_chain_indents(
     node: Node,
     bytes: &[u8],
@@ -180,10 +182,14 @@ fn collect_chain_indents(
         if child.kind() == "." {
             let row = child.start_position().row;
             let line_start = line_starts[row];
+            let line_end = line_starts.get(row + 1).map_or(bytes.len(), |&s| s - 1);
             let is_leading = bytes[line_start..child.start_byte()]
                 .iter()
                 .all(|b| *b == b' ' || *b == b'\t');
-            if is_leading {
+            let is_trailing = bytes[child.end_byte()..line_end]
+                .iter()
+                .all(|b| *b == b' ' || *b == b'\t' || *b == b'\r');
+            if is_leading || is_trailing {
                 let mut chain_root = child.parent().unwrap_or(child);
                 while let Some(p) = chain_root.parent() {
                     if matches!(p.kind(), "call_expression" | "selector_expression") {
@@ -361,6 +367,24 @@ result := compute(
         // `.bar(` line.
         let mangled = "x := foo()\n.bar(\na,\nb,\n)\n.baz()\n";
         let want = "x := foo()\n\t.bar(\n\t\ta,\n\t\tb,\n\t)\n\t.baz()\n";
+        assert_eq!(format(mangled), want);
+        assert_eq!(format(&want), want, "must be idempotent");
+    }
+
+    #[test]
+    fn formats_trailing_dot_builder_chain() {
+        // Trailing-dot style: each line ENDS with `.`. Continuation lines
+        // indent one level under the chain start.
+        let mangled = "wd := workdir.builder().\ninQueue(q).\ncpu(c).\nbuild()\n";
+        let want = "wd := workdir.builder().\n\tinQueue(q).\n\tcpu(c).\n\tbuild()\n";
+        assert_eq!(format(mangled), want);
+        assert_eq!(format(&want), want, "must be idempotent");
+    }
+
+    #[test]
+    fn formats_trailing_dot_chain_inside_block() {
+        let mangled = "f := func() {\nwd := b().\nwith(x).\nbuild()\n}\n";
+        let want = "f := func() {\n\twd := b().\n\t\twith(x).\n\t\tbuild()\n}\n";
         assert_eq!(format(mangled), want);
         assert_eq!(format(&want), want, "must be idempotent");
     }
