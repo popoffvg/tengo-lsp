@@ -140,11 +140,28 @@ fn cross_file_references(
     // References inside the defining module (bare `member` usages).
     if let Some(src) = read_source(overlay, module_file) {
         if let Some(uri) = Url::from_file_path(module_file).ok() {
+            // The export key itself *names* the member, so it must be renamed
+            // too. A divergent entry (`member: other.thing`) has no top-level
+            // def, so the scope walk below would miss the key entirely — add it
+            // explicitly. For the `member: member` shorthand this dedups away.
+            if let Some(range) = crate::exports::find_export_member_range(&src, member) {
+                locations.push(Location {
+                    uri: uri.clone(),
+                    range,
+                });
+            }
+            // Only the `member: member` shorthand is backed by a top-level def
+            // that this rename owns. For a divergent entry (`member: other`),
+            // any same-named top-level binding is an unrelated private symbol —
+            // skip it, or we'd corrupt code that merely shares the name.
+            let is_shorthand = crate::exports::export_member_is_shorthand(&src, member);
             let mut guard = parser.lock().unwrap();
             if let Some(state) = FileState::parse(uri.to_string(), src, &mut guard) {
                 drop(guard);
-                if let Some(def) = top_level_def(&state, member) {
-                    locations.extend(scope_references(&state, member, def, include_declaration));
+                if is_shorthand {
+                    if let Some(def) = top_level_def(&state, member) {
+                        locations.extend(scope_references(&state, member, def, include_declaration));
+                    }
                 }
             }
         }

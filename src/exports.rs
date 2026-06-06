@@ -312,6 +312,50 @@ pub fn find_export_member_range(source: &str, member: &str) -> Option<Range> {
     None
 }
 
+/// True when the top-level export entry for `member` is the `member: member`
+/// shorthand — i.e. its value is an identifier equal to the key. Only such a
+/// member is backed by a top-level definition that should be renamed alongside
+/// the key. Any other shape (`member: other.thing`, a literal, an inline func)
+/// must NOT drag a same-named top-level binding into the rename, since that
+/// binding is an unrelated private symbol.
+pub fn export_member_is_shorthand(source: &str, member: &str) -> bool {
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_tengo::LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return false,
+    };
+    let export_map = match find_export_map(tree.root_node()) {
+        Some(m) => m,
+        None => return false,
+    };
+    let mut cursor = export_map.walk();
+    for entry in export_map.children(&mut cursor) {
+        if entry.kind() != "map_entry" {
+            continue;
+        }
+        let key = match entry.child_by_field_name("key") {
+            Some(k) => k,
+            None => continue,
+        };
+        if key.utf8_text(source.as_bytes()).unwrap_or("").trim_matches('"') != member {
+            continue;
+        }
+        return match entry.child_by_field_name("value") {
+            Some(v) if v.kind() == "identifier" => {
+                v.utf8_text(source.as_bytes()).unwrap_or("") == member
+            }
+            _ => false,
+        };
+    }
+    false
+}
+
 pub fn node_to_range(node: tree_sitter::Node) -> Range {
     let s = node.start_position();
     let e = node.end_position();

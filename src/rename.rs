@@ -27,9 +27,6 @@ pub enum RenameError {
 /// return the identifier's range, so the editor can seed its rename box.
 pub fn prepare_rename(state: &FileState, position: Position) -> Option<Range> {
     let node = identifier_at(state, position)?;
-    if is_unsafe_export_key(state, node) {
-        return None;
-    }
     Some(crate::symbols::node_to_lsp_range(node))
 }
 
@@ -49,13 +46,10 @@ pub fn rename(
         )));
     }
 
-    let node = identifier_at(state, position).ok_or(RenameError::NotRenameable)?;
-    // Renaming a non-`name: name` export key would rewrite external usages
-    // (`alias.key`) while leaving the export map's key untouched — a broken,
-    // half-applied rename. Refuse rather than corrupt the public API.
-    if is_unsafe_export_key(state, node) {
-        return Err(RenameError::NotRenameable);
-    }
+    let _node = identifier_at(state, position).ok_or(RenameError::NotRenameable)?;
+    // A divergent export key (`member: other.thing`) is safe to rename now that
+    // the cross-file search rewrites the key itself and leaves any same-named
+    // private binding alone (see references::cross_file_references).
 
     let locations = references::find_references(state, position, true, roots, parser, overlay)
         .ok_or(RenameError::NotRenameable)?;
@@ -89,41 +83,6 @@ fn identifier_at(state: &FileState, position: Position) -> Option<tree_sitter::N
         Some(node)
     } else {
         None
-    }
-}
-
-/// True when `node` is the *key* of an `export { ... }` map entry that is **not**
-/// the `name: name` shorthand — i.e. a divergent (`ext: local`), literal
-/// (`v: 42`), or inline-function (`fn: func(){}`) key. Such keys cannot be
-/// renamed safely because the cross-file search would miss the key itself.
-fn is_unsafe_export_key(state: &FileState, node: tree_sitter::Node) -> bool {
-    let parent = match node.parent() {
-        Some(p) if p.kind() == "map_entry" => p,
-        _ => return false,
-    };
-    // `node` must be the key, not the value.
-    if parent.child_by_field_name("key").map(|k| k.id()) != Some(node.id()) {
-        return false;
-    }
-    if !within_export_map(state, node) {
-        return false;
-    }
-    let key_text = node.utf8_text(state.source.as_bytes()).unwrap_or("");
-    match parent.child_by_field_name("value") {
-        // `name: name` — value is an identifier matching the key: safe.
-        Some(v) if v.kind() == "identifier" => {
-            v.utf8_text(state.source.as_bytes()).unwrap_or("") != key_text
-        }
-        // Any other value shape (literal, inline func, divergent ident): unsafe.
-        _ => true,
-    }
-}
-
-/// Whether `node` lies within the top-level `export { ... }` map literal.
-fn within_export_map(state: &FileState, node: tree_sitter::Node) -> bool {
-    match crate::exports::find_export_map(state.tree.root_node()) {
-        Some(map) => node.start_byte() >= map.start_byte() && node.end_byte() <= map.end_byte(),
-        None => false,
     }
 }
 
@@ -217,14 +176,98 @@ mod tests {
     }
 
     #[test]
-    fn prepare_rejects_divergent_export_key() {
-        // `extName: localName` — the key cannot be renamed safely.
+    fn prepare_allows_divergent_export_key() {
+        // `extName: localName` — the key is now renameable (the cross-file
+        // search rewrites the key and leaves `localName` alone).
         let src = "localName := func() {\n    return 1\n}\n\nexport {\n    extName: localName\n}\n";
         let state = parse("file:///tmp/m.tengo", src);
-        // Cursor on the export key `extName`.
-        assert!(prepare_rename(&state, pos(src, "extName", 0)).is_none());
-        // But the local def `localName` is renameable.
+        assert!(prepare_rename(&state, pos(src, "extName", 0)).is_some());
+        // And the local def `localName` is renameable too.
         assert!(prepare_rename(&state, pos(src, "localName", 0)).is_some());
+    }
+
+    #[test]
+    fn divergent_key_rename_leaves_colliding_private_def() {
+        // `export { foo: bar }` while a *separate* top-level `foo` exists.
+        // Renaming the export key `foo` must touch ONLY the key (no consumers
+        // here) — never the unrelated private `foo := func`.
+        let base = std::env::temp_dir().join(format!(
+            "tengo-rename-coll-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(base.join("package.json"), "{}").unwrap();
+        let module = "foo := func() {\n    return 1\n}\n\nbar := func() {\n    return 2\n}\n\nexport {\n    foo: bar\n}\n";
+        let mfile = src.join("m.lib.tengo");
+        std::fs::write(&mfile, module).unwrap();
+
+        let uri = Url::from_file_path(&mfile).unwrap().to_string();
+        let state = parse(&uri, module);
+        // Cursor on the export key `foo` (2nd `foo`: def line 0, key line 8).
+        let edit = rename(
+            &state,
+            pos(module, "foo", 1),
+            "renamed",
+            &[src.clone()],
+            &new_parser(),
+            &no_overlay(),
+        )
+        .expect("rename ok");
+        let m_uri = Url::from_file_path(mfile.canonicalize().unwrap()).unwrap();
+        let m_edits = &edit.changes.unwrap()[&m_uri];
+        // Exactly the export key on line 9 (`    foo: bar`) — NOT the unrelated
+        // private `foo := func` (line 0).
+        assert_eq!(m_edits.len(), 1, "only the export key should change: {m_edits:?}");
+        assert_eq!(m_edits[0].range.start.line, 9, "must be the export key, not the private def");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn renames_divergent_wrapped_export_key_from_key() {
+        // The user's actual path: no consumers, rename initiated ON the export
+        // key inside `export ll.toStrict({ hasGpu: feats.hasGpu })`.
+        let base = std::env::temp_dir().join(format!(
+            "tengo-rename-fromkey-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(base.join("package.json"), "{}").unwrap();
+        let module = "ll := import(\":ll\")\nfeats := import(\":feats\")\n\nexport ll.toStrict({\n    hasGpu: feats.hasGpu\n})\n";
+        let mfile = src.join("exec.lib.tengo");
+        std::fs::write(&mfile, module).unwrap();
+
+        let uri = Url::from_file_path(&mfile).unwrap().to_string();
+        let state = parse(&uri, module);
+        // Cursor on the export key `hasGpu` (1st occurrence — the key).
+        assert!(prepare_rename(&state, pos(module, "hasGpu", 0)).is_some());
+        let edit = rename(
+            &state,
+            pos(module, "hasGpu", 0),
+            "hasGpu2",
+            &[src.clone()],
+            &new_parser(),
+            &no_overlay(),
+        )
+        .expect("rename ok");
+        let m_uri = Url::from_file_path(mfile.canonicalize().unwrap()).unwrap();
+        let m_edits = &edit.changes.unwrap()[&m_uri];
+        // Only the key — the value `feats.hasGpu` (feats' own member) is untouched.
+        assert_eq!(m_edits.len(), 1, "only the export key should change: {m_edits:?}");
+        assert_eq!(m_edits[0].range.start.line, 4);
+        assert_eq!(m_edits[0].range.start.character, 4, "must be the key, not the value field");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -379,6 +422,58 @@ mod tests {
             changes.get(&a_uri).map_or(false, |e| e.len() == 1),
             "overlay usage not renamed: {changes:?}"
         );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn renames_divergent_wrapped_export_key_from_consumer() {
+        // Regression: `export ll.toStrict({ hasGpu: feats.hasGpu })` — the key
+        // `hasGpu` has NO top-level def (it re-exports another module's member).
+        // Renaming from a consumer must still rewrite the export KEY, not just
+        // the `exec.hasGpu` usages, or the public API is left half-renamed.
+        let base = std::env::temp_dir().join(format!(
+            "tengo-rename-div-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(base.join("package.json"), "{}").unwrap();
+        let module = "ll := import(\":ll\")\nfeats := import(\":feats\")\n\nexport ll.toStrict({\n    hasGpu: feats.hasGpu\n})\n";
+        let mfile = src.join("exec.lib.tengo");
+        std::fs::write(&mfile, module).unwrap();
+        let consumer = src.join("c.lib.tengo");
+        let consumer_src = "exec := import(\":exec\")\nz := exec.hasGpu\n";
+        std::fs::write(&consumer, consumer_src).unwrap();
+
+        let uri = Url::from_file_path(&consumer).unwrap().to_string();
+        let state = parse(&uri, consumer_src);
+        // Cursor on `hasGpu` in `exec.hasGpu` (the field).
+        let edit = rename(
+            &state,
+            pos(consumer_src, "hasGpu", 0),
+            "hasGpu2",
+            &[src.clone()],
+            &new_parser(),
+            &no_overlay(),
+        )
+        .expect("rename ok");
+        let changes = edit.changes.unwrap();
+        // The module's export key must be in the edits.
+        let m_uri = Url::from_file_path(mfile.canonicalize().unwrap()).unwrap();
+        let m_edits = changes.get(&m_uri).expect("module must be edited");
+        // Exactly the export key on line 4 (`    hasGpu: feats.hasGpu`) — and NOT
+        // the value `feats.hasGpu` (that field belongs to the feats module).
+        assert_eq!(m_edits.len(), 1, "expected only the export key: {m_edits:?}");
+        assert_eq!(m_edits[0].range.start.line, 4);
+        assert_eq!(m_edits[0].range.start.character, 4, "must be the key, not the value");
+        // And the consumer usage.
+        let c_uri = Url::from_file_path(&consumer).unwrap();
+        assert_eq!(changes[&c_uri].len(), 1);
 
         std::fs::remove_dir_all(&base).ok();
     }
