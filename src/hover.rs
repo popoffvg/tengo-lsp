@@ -101,10 +101,10 @@ fn format_doc(doc: &str) -> String {
         sections.push(body.to_string());
     }
     if !params.is_empty() {
-        sections.push(format!("**Parameters**\n\n{}", params.join("\n")));
+        sections.push(format!("**Parameters**\n\n{}", params.join("  \n")));
     }
     if !returns.is_empty() {
-        sections.push(format!("**Returns**\n\n{}", returns.join("\n")));
+        sections.push(format!("**Returns**\n\n{}", returns.join("  \n")));
     }
     if !other.is_empty() {
         sections.push(other.join("\n\n"));
@@ -162,7 +162,7 @@ fn format_param(body: &str) -> String {
     }
 
     let desc = rest.trim();
-    let mut out = format!("- `{name}`");
+    let mut out = format!("`{name}`");
     if let Some(t) = ty.filter(|t| !t.is_empty()) {
         out.push_str(&format!(" *({t})*"));
     }
@@ -258,7 +258,7 @@ mod tests {
         let s = format_doc(doc);
         assert!(s.contains("Builder function for creating a RunCommand resource."));
         assert!(s.contains("**Parameters**"));
-        assert!(s.contains("- `workdir` *(smart.reference)* — the working directory for the command."));
+        assert!(s.contains("`workdir` *(smart.reference)* — the working directory for the command."));
         assert!(s.contains("**Returns**"));
         assert!(s.contains("`builder` — the builder object with methods."));
     }
@@ -270,21 +270,21 @@ mod tests {
         // The metaInputs continuation must stay under opts, not leak into the lead.
         let lead = s.split("**Parameters**").next().unwrap();
         assert!(!lead.contains("metaInputs"));
-        assert!(s.contains("- `opts` — (optional) a map of options: metaInputs: a map of meta inputs. No effect on ephemeral templates."));
-        assert!(s.contains("- `tpl` — template resource"));
+        assert!(s.contains("`opts` — (optional) a map of options: metaInputs: a map of meta inputs. No effect on ephemeral templates."));
+        assert!(s.contains("`tpl` — template resource"));
         assert!(s.contains("`renderer` — a smart resource"));
     }
 
     #[test]
     fn formats_param_without_type() {
-        assert_eq!(format_param("count - number of items"), "- `count` — number of items");
+        assert_eq!(format_param("count - number of items"), "`count` — number of items");
     }
 
     #[test]
     fn formats_jsdoc_brace_type_param() {
         assert_eq!(
             format_param("{string} name the user name"),
-            "- `name` *(string)* — the user name"
+            "`name` *(string)* — the user name"
         );
     }
 
