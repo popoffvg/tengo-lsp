@@ -86,8 +86,15 @@ fn format_doc(doc: &str) -> String {
                 _ => &mut other,
             };
             if let Some(last) = bucket.last_mut() {
-                last.push(' ');
-                last.push_str(line);
+                // A sub-bullet (`- foo`, `* foo`) keeps its own line; wrapped
+                // prose is space-joined onto the previous line.
+                if matches!(line.chars().next(), Some('-' | '*' | '•')) {
+                    last.push_str("  \n  - ");
+                    last.push_str(line[1..].trim_start());
+                } else {
+                    last.push(' ');
+                    last.push_str(line);
+                }
             } else {
                 bucket.push(line.to_string());
             }
@@ -265,14 +272,22 @@ mod tests {
 
     #[test]
     fn attaches_continuation_lines_to_their_tag() {
-        let doc = "Creates ephemeral render template resource.\n@param tpl: template resource\n@param opts: (optional) a map of options:\n  metaInputs: a map of meta inputs. No effect on ephemeral templates.\n@return renderer: a smart resource";
+        let doc = "Creates ephemeral render template resource.\n@param tpl: template resource\n@param opts: (optional) a map of options:\n  - metaInputs: a map of meta inputs. No effect on ephemeral templates.\n@return renderer: a smart resource";
         let s = format_doc(doc);
         // The metaInputs continuation must stay under opts, not leak into the lead.
         let lead = s.split("**Parameters**").next().unwrap();
         assert!(!lead.contains("metaInputs"));
-        assert!(s.contains("`opts` — (optional) a map of options: metaInputs: a map of meta inputs. No effect on ephemeral templates."));
+        // Sub-bullet keeps its own line (not flattened inline after the colon).
+        assert!(s.contains("`opts` — (optional) a map of options:  \n  - metaInputs: a map of meta inputs. No effect on ephemeral templates."));
         assert!(s.contains("`tpl` — template resource"));
         assert!(s.contains("`renderer` — a smart resource"));
+    }
+
+    #[test]
+    fn wraps_plain_continuation_inline() {
+        let doc = "@param x: a value\n   that wraps across lines";
+        let s = format_doc(doc);
+        assert!(s.contains("`x` — a value that wraps across lines"));
     }
 
     #[test]
