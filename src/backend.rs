@@ -12,6 +12,8 @@ use crate::completion as completion_impl;
 use crate::definition;
 use crate::document::FileState;
 use crate::hover as hover_impl;
+use crate::lint;
+use crate::lint_config::LintConfig;
 use crate::outline;
 use crate::references;
 use crate::rename as rename_impl;
@@ -21,6 +23,7 @@ pub struct Backend {
     documents: DashMap<String, FileState>,
     parser: Mutex<Parser>,
     workspace_roots: Mutex<Vec<std::path::PathBuf>>,
+    lint_config: Mutex<LintConfig>,
 }
 
 impl Backend {
@@ -34,6 +37,28 @@ impl Backend {
             documents: DashMap::new(),
             parser: Mutex::new(parser),
             workspace_roots: Mutex::new(Vec::new()),
+            lint_config: Mutex::new(LintConfig::default()),
+        }
+    }
+
+    /// Lint the stored document and push the result to the client. Locks are
+    /// released before the await so a slow client cannot block a reparse.
+    async fn publish_lint(&self, uri: &str) {
+        let diagnostics = {
+            let Some(state) = self.documents.get(uri) else {
+                return;
+            };
+            let config = self.lint_config.lock().unwrap();
+            if config.is_excluded(uri) {
+                Vec::new()
+            } else {
+                lint::check(&state, &config)
+            }
+        };
+        if let Ok(url) = Url::parse(uri) {
+            self.client
+                .publish_diagnostics(url, diagnostics, None)
+                .await;
         }
     }
 
@@ -92,6 +117,22 @@ impl LanguageServer for Backend {
         }
         *self.workspace_roots.lock().unwrap() = roots;
 
+        // `lint.tengo` is read once per session from the first workspace root.
+        if let Some(root) = self.workspace_roots.lock().unwrap().first() {
+            let (config, problems) = lint::load_config(root);
+            if let Some(path) = &config.path {
+                log::info!(
+                    "tengo-lint: config {} ({} custom rule(s))",
+                    path.display(),
+                    config.custom.len()
+                );
+            }
+            for problem in &problems {
+                log::warn!("tengo-lint: config: {problem}");
+            }
+            *self.lint_config.lock().unwrap() = config;
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -127,7 +168,8 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
         let text = params.text_document.text;
-        self.parse_and_store(uri, text);
+        self.parse_and_store(uri.clone(), text);
+        self.publish_lint(&uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -138,14 +180,19 @@ impl LanguageServer for Backend {
                 let mut parser = self.parser.lock().unwrap();
                 state.reparse(change.text, &mut parser);
             } else {
-                self.parse_and_store(uri, change.text);
+                self.parse_and_store(uri.clone(), change.text);
             }
+            self.publish_lint(&uri).await;
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
         self.documents.remove(&uri);
+        // Clear diagnostics so a closed file stops showing stale findings.
+        if let Ok(url) = Url::parse(&uri) {
+            self.client.publish_diagnostics(url, Vec::new(), None).await;
+        }
     }
 
     async fn goto_definition(
